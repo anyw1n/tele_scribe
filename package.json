@@ -1,0 +1,30 @@
+{
+  "name": "TeleScribe",
+  "description": "Telegram bot for transcribing voice messages",
+  "version": "1.0.0",
+  "scripts": {
+    "compile": "tsc",
+    "start": "NODE_ENV=prod node dist/src/app.js",
+    "local": "NODE_ENV=local ts-node src/app.ts",
+    "deploy": "npm run compile && gcloud app deploy"
+  },
+  "engines": {
+    "node": "22"
+  },
+  "main": "dist/src/app.js",
+  "dependencies": {
+    "@grammyjs/auto-retry": "^2.0.2",
+    "@grammyjs/transformer-throttler": "^1.2.1",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "grammy": "^1.38.1",
+    "openai": "^5.13.1"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
+  },
+  "private": true
+}

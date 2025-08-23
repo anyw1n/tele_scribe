@@ -1,0 +1,11 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "gcloud: list files for upload",
+            "type": "shell",
+            "command": "gcloud meta list-files-for-upload",
+            "problemMatcher": []
+        }
+    ]
+}

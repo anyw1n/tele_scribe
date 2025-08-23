@@ -1,0 +1,4 @@
+runtime: nodejs22
+instance_class: F1 # ! 28 h/d RAM 384 MB CPU 600 MHz
+automatic_scaling:
+  min_instances: 1
