@@ -4,7 +4,7 @@ import { Bot, Context, webhookCallback } from 'grammy';
 import { Message } from 'grammy/types';
 
 import { Stream, transcribe, TranscriptionStreamEvent } from './ai';
-import { deleteFile, downloadVoiceMessage } from './util';
+import { deleteFile, download, extractAudioFromVideo } from './util';
 
 const { BOT_TOKEN: botToken, WH_DOMAIN: whDomain } = process.env;
 
@@ -81,7 +81,7 @@ bot.on(':voice', async (ctx) => {
     return msg;
 });
 
-// TODO: Add stop button, file size limit (25 MB OpenAI, 20 MB Bot API), ai errors handling
+// TODO: Add stop button, check file size limit (25 MB OpenAI, 20 MB Bot API)
 /**
  * Processes voice messages by downloading, transcribing, and streaming results
  * 
@@ -109,7 +109,7 @@ async function botOnVoice(ctx: Context & { msg: Message.VoiceMessage }, returnMs
     let filePath: string | undefined;
     try {
         const file = await ctx.getFile();
-        filePath = await downloadVoiceMessage(getFileUrl(file.file_path!));
+        filePath = await download(getFileUrl(file.file_path!));
 
         await streamTranscriptionToBot(ctx, returnMsgId, await transcribe(filePath));
         console.log('[Bot] Voice message processing completed successfully in', Date.now() - startTime, 'ms');
@@ -126,6 +126,75 @@ async function botOnVoice(ctx: Context & { msg: Message.VoiceMessage }, returnMs
         editMessageText(ctx, returnMsgId, `Error processing voice message: ${error.message}`);
     } finally {
         if (filePath) deleteFile(filePath);
+    }
+}
+
+bot.on(':video_note', async (ctx) => {
+    const videoNote = ctx.msg.video_note;
+    console.log('[Bot] Video note received:', {
+        fileId: videoNote.file_id,
+        fileSize: videoNote.file_size,
+        duration: videoNote.duration,
+        userId: ctx.from?.id,
+        chatId: ctx.chatId,
+        messageId: ctx.msgId,
+    });
+
+    const msg = await ctx.reply(`<em>Start transcribing...</em>`, {
+        ...htmlFmt,
+        reply_parameters: { message_id: ctx.msgId },
+    });
+    botOnVideoNote(ctx, msg.message_id);
+    return msg;
+});
+
+/**
+ * Processes voice messages by downloading, transcribing, and streaming results
+ * 
+ * @param ctx - Bot context with voice message
+ * @param returnMsgId - ID of the message to update with transcription results
+ * 
+ * @example
+ * ```typescript
+ * await botOnVoice(ctx, messageId);
+ * ```
+ */
+async function botOnVideoNote(ctx: Context & { msg: Message.VideoNoteMessage }, returnMsgId: number) {
+    const startTime = Date.now();
+    const videoNote = ctx.msg.video_note;
+
+    console.log('[Bot] Starting video note processing:', {
+        fileId: videoNote.file_id,
+        fileSize: videoNote.file_size,
+        duration: videoNote.duration,
+        returnMsgId,
+        userId: ctx.from?.id,
+        chatId: ctx.chatId,
+    });
+
+    let videoFilePath: string | undefined;
+    let audioFilePath: string | undefined;
+    try {
+        const file = await ctx.getFile();
+        videoFilePath = await download(getFileUrl(file.file_path!));
+        audioFilePath = await extractAudioFromVideo(videoFilePath);
+
+        await streamTranscriptionToBot(ctx, returnMsgId, await transcribe(audioFilePath));
+        console.log('[Bot] Video note processing completed successfully in', Date.now() - startTime, 'ms');
+    } catch (error: any) {
+        console.error('[Bot] Error processing video note', {
+            error: error.message,
+            stack: error.stack,
+            chatId: ctx.chatId,
+            userId: ctx.from?.id,
+            fileId: videoNote.file_id,
+            processingTime: Date.now() - startTime,
+            videoFilePath,
+        });
+        editMessageText(ctx, returnMsgId, `Error processing video note: ${error.message}`);
+    } finally {
+        if (videoFilePath) deleteFile(videoFilePath);
+        if (audioFilePath) deleteFile(audioFilePath);
     }
 }
 

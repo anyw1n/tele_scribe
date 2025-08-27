@@ -10,7 +10,7 @@ export type { Stream, TranscriptionStreamEvent };
 /**
  * OpenAI client instance for AI operations
  */
-const ai = new OpenAI();
+const ai = new OpenAI({ logLevel: 'info' });
 
 /**
  * Transcribes an audio file using OpenAI
