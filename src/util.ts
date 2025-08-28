@@ -1,8 +1,7 @@
 import { join } from 'path';
 import { tmpdir } from 'os';
-import { writeFile } from 'fs/promises';
+import { writeFile, unlink } from 'fs/promises';
 import { Readable } from 'stream';
-import { unlink } from 'fs';
 import { spawn } from 'child_process';
 
 /**
@@ -64,18 +63,17 @@ export async function download(url: string) {
  * // File will be deleted and result logged
  * ```
  */
-export function deleteFile(filePath: string) {
-    unlink(filePath, (error) => {
-        if (error) {
-            console.error(`[deleteFile] File not deleted`, { filePath, error });
-        } else {
-            console.log(`[deleteFile] File deleted`, { filePath });
-        }
-    });
+export async function deleteFile(filePath: string) {
+    try {
+        await unlink(filePath);
+        console.log(`[deleteFile] File deleted`, { filePath });
+    } catch (error: any) {
+        console.error(`[deleteFile] File not deleted`, { filePath, error });
+    }
 }
 
 /**
- * Extracts audio from an video file using ffmpeg.
+ * Extracts audio from a video file using ffmpeg.
  * Returns the path to the extracted audio file (preserves original audio format).
  * 
  * @param filePath - Path to the video file

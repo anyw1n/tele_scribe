@@ -1,7 +1,8 @@
-import { autoRetry } from "@grammyjs/auto-retry";
-import { apiThrottler } from "@grammyjs/transformer-throttler";
-import { Bot, Context, webhookCallback } from 'grammy';
+import { autoRetry } from '@grammyjs/auto-retry';
+import { apiThrottler } from '@grammyjs/transformer-throttler';
+import { Bot, Context, RawApi, webhookCallback } from 'grammy';
 import { Message } from 'grammy/types';
+import { Other } from 'grammy/out/core/api';
 
 import { Stream, transcribe, TranscriptionStreamEvent } from './ai';
 import { deleteFile, download, extractAudioFromVideo } from './util';
@@ -58,16 +59,12 @@ bot.command('start', (ctx) => {
 });
 
 /**
- * Handles incoming voice messages
+ * Handles incoming voice and video note messages
  * Initiates transcription process and sends status updates
  */
-bot.on(':voice', async (ctx) => {
-    const voiceMessage = ctx.msg.voice;
-    console.log('[Bot] Voice message received:', {
-        fileId: voiceMessage.file_id,
-        fileSize: voiceMessage.file_size,
-        duration: voiceMessage.duration,
-        mimeType: voiceMessage.mime_type,
+bot.on([':voice', ':video_note'], async (ctx) => {
+    console.log('[Bot] Message received:', {
+        messageType: 'voice' in ctx.msg ? 'voice' : 'video_note',
         userId: ctx.from?.id,
         chatId: ctx.chatId,
         messageId: ctx.msgId,
@@ -77,124 +74,60 @@ bot.on(':voice', async (ctx) => {
         ...htmlFmt,
         reply_parameters: { message_id: ctx.msgId },
     });
-    botOnVoice(ctx, msg.message_id);
+    transcribeMedia(ctx, msg);
     return msg;
 });
 
 // TODO: Add stop button, check file size limit (25 MB OpenAI, 20 MB Bot API)
 /**
- * Processes voice messages by downloading, transcribing, and streaming results
+ * Processes voice and video note messages by downloading, transcribing, and streaming results
  * 
- * @param ctx - Bot context with voice message
- * @param returnMsgId - ID of the message to update with transcription results
+ * @param ctx - Bot context with media file
+ * @param returnMsg - Message to update with transcription results
  * 
  * @example
  * ```typescript
- * await botOnVoice(ctx, messageId);
+ * await transcribeMedia(ctx, message);
  * ```
  */
-async function botOnVoice(ctx: Context & { msg: Message.VoiceMessage }, returnMsgId: number) {
+async function transcribeMedia(
+    ctx: Context & { msg: Message.VoiceMessage | Message.VideoNoteMessage },
+    returnMsg: Message,
+) {
     const startTime = Date.now();
-    const voiceMessage = ctx.msg.voice;
-
-    console.log('[Bot] Starting voice message processing:', {
-        fileId: voiceMessage.file_id,
-        fileSize: voiceMessage.file_size,
-        duration: voiceMessage.duration,
-        returnMsgId,
-        userId: ctx.from?.id,
-        chatId: ctx.chatId,
-    });
-
     let filePath: string | undefined;
     try {
         const file = await ctx.getFile();
+        console.log('[Bot] File info received:', {
+            fileId: file.file_id,
+            fileSize: file.file_size,
+            filePath: file.file_path,
+            userId: ctx.from?.id,
+            chatId: ctx.chatId,
+            messageId: ctx.msgId,
+        });
         filePath = await download(getFileUrl(file.file_path!));
 
-        await streamTranscriptionToBot(ctx, returnMsgId, await transcribe(filePath));
-        console.log('[Bot] Voice message processing completed successfully in', Date.now() - startTime, 'ms');
+        if ('video_note' in ctx.msg) {
+            const extractedAudioPath = await extractAudioFromVideo(filePath);
+            deleteFile(filePath);
+            filePath = extractedAudioPath;
+        }
+
+        await streamTranscriptionToBot(returnMsg, await transcribe(filePath));
+        console.log('[Bot] Message processing completed successfully in', Date.now() - startTime, 'ms');
     } catch (error: any) {
-        console.error('[Bot] Error processing voice message', {
+        console.error('[Bot] Error processing message', {
             error: error.message,
             stack: error.stack,
             chatId: ctx.chatId,
             userId: ctx.from?.id,
-            fileId: voiceMessage.file_id,
             processingTime: Date.now() - startTime,
             filePath,
         });
-        editMessageText(ctx, returnMsgId, `Error processing voice message: ${error.message}`);
+        editMessageText(returnMsg, `Error processing message: ${error.message}`);
     } finally {
         if (filePath) deleteFile(filePath);
-    }
-}
-
-bot.on(':video_note', async (ctx) => {
-    const videoNote = ctx.msg.video_note;
-    console.log('[Bot] Video note received:', {
-        fileId: videoNote.file_id,
-        fileSize: videoNote.file_size,
-        duration: videoNote.duration,
-        userId: ctx.from?.id,
-        chatId: ctx.chatId,
-        messageId: ctx.msgId,
-    });
-
-    const msg = await ctx.reply(`<em>Start transcribing...</em>`, {
-        ...htmlFmt,
-        reply_parameters: { message_id: ctx.msgId },
-    });
-    botOnVideoNote(ctx, msg.message_id);
-    return msg;
-});
-
-/**
- * Processes voice messages by downloading, transcribing, and streaming results
- * 
- * @param ctx - Bot context with voice message
- * @param returnMsgId - ID of the message to update with transcription results
- * 
- * @example
- * ```typescript
- * await botOnVoice(ctx, messageId);
- * ```
- */
-async function botOnVideoNote(ctx: Context & { msg: Message.VideoNoteMessage }, returnMsgId: number) {
-    const startTime = Date.now();
-    const videoNote = ctx.msg.video_note;
-
-    console.log('[Bot] Starting video note processing:', {
-        fileId: videoNote.file_id,
-        fileSize: videoNote.file_size,
-        duration: videoNote.duration,
-        returnMsgId,
-        userId: ctx.from?.id,
-        chatId: ctx.chatId,
-    });
-
-    let videoFilePath: string | undefined;
-    let audioFilePath: string | undefined;
-    try {
-        const file = await ctx.getFile();
-        videoFilePath = await download(getFileUrl(file.file_path!));
-        audioFilePath = await extractAudioFromVideo(videoFilePath);
-
-        await streamTranscriptionToBot(ctx, returnMsgId, await transcribe(audioFilePath));
-        console.log('[Bot] Video note processing completed successfully in', Date.now() - startTime, 'ms');
-    } catch (error: any) {
-        console.error('[Bot] Error processing video note', {
-            error: error.message,
-            stack: error.stack,
-            chatId: ctx.chatId,
-            userId: ctx.from?.id,
-            fileId: videoNote.file_id,
-            processingTime: Date.now() - startTime,
-            videoFilePath,
-        });
-        editMessageText(ctx, returnMsgId, `Error processing video note: ${error.message}`);
-    } finally {
-        if (videoFilePath) deleteFile(videoFilePath);
-        if (audioFilePath) deleteFile(audioFilePath);
     }
 }
 
@@ -207,35 +140,29 @@ const messagesDelay = 1000;
  */
 const charsInMessage = 4096;
 /**
- * Reserved characters for status indicators like "Generating..."
+ * Reserved characters for status indicators like 'Generating...'
  */
 const reservedChars = 23;
 
 /**
  * Streams transcription results to the bot, handling message splitting and updates
  * 
- * @param ctx - Bot context for sending messages
- * @param returnMsgId - ID of the initial message to update
+ * @param returnMsg - Message that will be updated and used for threading
  * @param stream - Stream of transcription events from OpenAI
  * 
  * @example
  * ```typescript
- * await streamTranscriptionToBot(ctx, messageId, transcriptionStream);
+ * await streamTranscriptionToBot(message, stream);
  * ```
  */
 async function streamTranscriptionToBot(
-    ctx: Context,
-    returnMsgId: number,
+    returnMsg: Message,
     stream: Stream<TranscriptionStreamEvent>,
 ) {
     const startTime = Date.now();
-    console.log('[Stream] Starting transcription streaming:', {
-        returnMsgId,
-        chatId: ctx.chatId,
-        userId: ctx.from?.id,
-    });
+    console.log('[Stream] Starting transcription streaming');
 
-    let lastMsgTime = Date.now();
+    let lastMsgTime = startTime;
     let buffer = '';
     let messageCount = 1; // Start with 1 for the initial message
 
@@ -253,32 +180,34 @@ async function streamTranscriptionToBot(
                 if (now - lastMsgTime > messagesDelay) {
                     lastMsgTime = now;
                     console.log('[Stream] Updating message with new content:', {
-                        messageId: returnMsgId,
+                        messageId: returnMsg.message_id,
                         bufferLength: buffer.length,
                         timeSinceLastUpdate: now - lastMsgTime,
                     });
-                    editMessageText(ctx, returnMsgId, `${buffer}\n<em>Generating...</em>`, htmlFmt);
+                    editMessageText(returnMsg, `${buffer}\n<em>Generating...</em>`, htmlFmt);
                 }
             } else {
                 console.log('[Stream] Message limit reached, creating new message:', {
-                    oldMessageId: returnMsgId,
+                    oldMessageId: returnMsg.message_id,
                     bufferLength: buffer.length,
                     newChunkLength: chunk.delta.length,
                 });
 
-                const oldReturnMsgId = returnMsgId;
-                returnMsgId = (await ctx.reply(`${chunk.delta}\n<em>Generating...</em>`, {
+                const oldReturnMsg = returnMsg;
+                returnMsg = await bot.api.sendMessage(
+                    returnMsg.chat.id,
+                    `${chunk.delta}\n<em>Generating...</em>`, {
                     ...htmlFmt,
-                    reply_parameters: { message_id: returnMsgId },
-                })).message_id;
+                    reply_parameters: { message_id: returnMsg.message_id },
+                });
                 messageCount++;
 
                 lastMsgTime = now;
                 console.log('[Stream] Finalizing previous message:', {
-                    messageId: oldReturnMsgId,
+                    messageId: oldReturnMsg.message_id,
                     finalLength: buffer.length,
                 });
-                editMessageText(ctx, oldReturnMsgId, buffer);
+                editMessageText(oldReturnMsg, buffer);
                 buffer = chunk.delta;
             }
         } else if (chunk.type === 'transcript.text.done') {
@@ -299,32 +228,34 @@ async function streamTranscriptionToBot(
     }
 
     console.log('[Stream] Finalizing transcription:', {
-        messageId: returnMsgId,
+        messageId: returnMsg.message_id,
         finalLength: buffer.length,
         totalProcessingTime: Date.now() - startTime,
         totalMessages: messageCount,
     });
 
-    return editMessageText(ctx, returnMsgId, buffer);
+    return editMessageText(returnMsg, buffer);
 }
 
 /**
  * Helper function for editing message text with optional HTML formatting
  * 
- * @param ctx - Bot context
- * @param messageId - ID of the message to edit
- * @param text - New text content
- * @param format - Optional HTML formatting options
- * @returns Promise that resolves when message is edited
+ * @param msg - Message to edit
+ * @param text - New text of the message, 1-4096 characters after entities parsing
+ * @param other - Optional remaining parameters, confer the official reference below
+ * @returns Promise that resolves when the message is edited
  * 
  * @example
  * ```typescript
- * await editMessageText(ctx, messageId, "Updated text");
- * await editMessageText(ctx, messageId, "<b>Bold text</b>", htmlFmt);
+ * await editMessageText(ctx, messageId, 'Updated text');
+ * await editMessageText(ctx, messageId, '<b>Bold text</b>', htmlFmt);
  * ```
  */
-const editMessageText = (ctx: Context, messageId: number, text: string, format?: typeof htmlFmt) =>
-    ctx.api.editMessageText(ctx.chatId!, messageId, text, format ? htmlFmt : undefined);
+const editMessageText = (
+    msg: Message,
+    text: string,
+    other?: Other<RawApi, 'editMessageText', 'chat_id' | 'message_id' | 'text' | 'inline_message_id'>,
+) => bot.api.editMessageText(msg.chat.id, msg.message_id, text, other);
 
 /**
  * Constructs the full URL for downloading a file from Telegram
