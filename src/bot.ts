@@ -1,19 +1,31 @@
 import { autoRetry } from '@grammyjs/auto-retry';
 import { apiThrottler } from '@grammyjs/transformer-throttler';
-import { Bot, Context, RawApi, webhookCallback } from 'grammy';
-import { Message } from 'grammy/types';
+import { Bot, Context, Filter, InlineKeyboard, RawApi, webhookCallback } from 'grammy';
 import { Other } from 'grammy/out/core/api';
+import { Message } from 'grammy/types';
 
-import { Stream, transcribe, TranscriptionStreamEvent } from './ai';
-import { deleteFile, download, extractAudioFromVideo } from './util';
+import { transcribe } from './ai';
+import * as util from './util';
 
 const { BOT_TOKEN: botToken, WH_DOMAIN: whDomain } = process.env;
+
+/**
+ * Maximum characters allowed in a single Telegram message
+ * Used for chunking long transcription results
+ */
+const charsInMessage = 4096;
 
 /**
  * Telegram bot instance with throttling and auto-retry middleware
  */
 const bot = new Bot(botToken!);
 bot.api.config.use(apiThrottler(), autoRetry());
+
+/**
+ * Map to track active transcription cancellations
+ * Key: cancellation ID (message ID), Value: AbortController
+ */
+const cancellations = new Map<string, AbortController>();
 
 /**
  * Creates and configures a webhook for the Telegram bot
@@ -24,6 +36,8 @@ bot.api.config.use(apiThrottler(), autoRetry());
  * ```typescript
  * app.use(express.json(), await createWebhook());
  * ```
+ * 
+ * @throws {Error} When webhook setup fails or domain is invalid
  */
 export async function createWebhook() {
     console.log('[Webhook] Creating webhook with domain:', whDomain);
@@ -40,7 +54,7 @@ export async function createWebhook() {
 }
 
 /**
- * Adds HTML formatting to message
+ * HTML formatting configuration for Telegram messages
  */
 const htmlFmt = { parse_mode: 'HTML' } as const;
 
@@ -59,8 +73,27 @@ bot.command('start', (ctx) => {
 });
 
 /**
+ * Handles callback queries from inline keyboards
+ */
+bot.on('callback_query:data', async (ctx) => {
+    const [action, data] = ctx.callbackQuery.data.split(':');
+    switch (action) {
+        case 'stop':
+            const abortController = data && cancellations.get(data);
+            if (!abortController) {
+                return ctx.answerCallbackQuery({ text: 'Error' });
+            }
+            abortController.abort();
+            return ctx.answerCallbackQuery({ text: 'Stopped' });
+    }
+    return ctx.answerCallbackQuery({ text: 'Not implemented' });
+});
+
+/**
  * Handles incoming voice and video note messages
- * Initiates transcription process and sends status updates
+ * 
+ * Initiates transcription process for audio content and sends status updates.
+ * Creates a cancellation mechanism to allow users to stop transcription.
  */
 bot.on([':voice', ':video_note'], async (ctx) => {
     console.log('[Bot] Message received:', {
@@ -70,29 +103,50 @@ bot.on([':voice', ':video_note'], async (ctx) => {
         messageId: ctx.msgId,
     });
 
+    const cancellationId = `${ctx.msgId}`;
+    const abortController = new AbortController();
+    cancellations.set(cancellationId, abortController);
+
     const msg = await ctx.reply(`<em>Start transcribing...</em>`, {
         ...htmlFmt,
         reply_parameters: { message_id: ctx.msgId },
+        reply_markup: new InlineKeyboard().text('Stop', `stop:${cancellationId}`),
     });
-    transcribeMedia(ctx, msg);
+    transcribeMedia(ctx, msg, abortController.signal)
+        .finally(() => cancellations.delete(cancellationId));
     return msg;
 });
 
-// TODO: Add stop button, check file size limit (25 MB OpenAI, 20 MB Bot API)
 /**
  * Processes voice and video note messages by downloading, transcribing, and streaming results
  * 
+ * Downloads the media file from Telegram, extracts audio if needed, transcribes the content,
+ * and sends the results back to the user. Handles both voice messages and video notes.
+ * 
+ * Process flow:
+ * 1. Download media file from Telegram
+ * 2. Extract audio from video notes (if applicable)
+ * 3. Transcribe audio using OpenAI Whisper
+ * 4. Split long transcriptions into chunks
+ * 5. Send results to user
+ * 6. Clean up temporary files
+ * 
  * @param ctx - Bot context with media file
  * @param returnMsg - Message to update with transcription results
+ * @param signal - An AbortSignal that can be used to cancel the request
  * 
  * @example
  * ```typescript
- * await transcribeMedia(ctx, message);
+ * await transcribeMedia(ctx, message, abortController.signal);
  * ```
+ * 
+ * @throws {Error} When file download, transcription, or message sending fails
+ * @throws {AbortError} When the process is cancelled by user
  */
 async function transcribeMedia(
-    ctx: Context & { msg: Message.VoiceMessage | Message.VideoNoteMessage },
-    returnMsg: Message,
+    ctx: Filter<Context, ':voice' | ':video_note'>,
+    returnMsg: Message.TextMessage,
+    signal: AbortSignal,
 ) {
     const startTime = Date.now();
     let filePath: string | undefined;
@@ -106,15 +160,26 @@ async function transcribeMedia(
             chatId: ctx.chatId,
             messageId: ctx.msgId,
         });
-        filePath = await download(getFileUrl(file.file_path!));
+        filePath = await util.download(getFileUrl(file.file_path!), signal);
 
         if ('video_note' in ctx.msg) {
-            const extractedAudioPath = await extractAudioFromVideo(filePath);
-            deleteFile(filePath);
+            const extractedAudioPath = await util.extractAudioFromVideo(filePath, signal);
+            util.deleteFile(filePath);
             filePath = extractedAudioPath;
         }
 
-        await streamTranscriptionToBot(returnMsg, await transcribe(filePath));
+        const chunks = util.chunked(await transcribe(filePath, signal), charsInMessage);
+
+        await editMessageText(returnMsg, chunks.shift()!);
+
+        for (const chunk of chunks) {
+            returnMsg = await bot.api.sendMessage(
+                returnMsg.chat.id,
+                chunk,
+                { reply_parameters: { message_id: returnMsg.message_id } },
+            );
+        }
+
         console.log('[Bot] Message processing completed successfully in', Date.now() - startTime, 'ms');
     } catch (error: any) {
         console.error('[Bot] Error processing message', {
@@ -125,131 +190,37 @@ async function transcribeMedia(
             processingTime: Date.now() - startTime,
             filePath,
         });
+        if (error.name === 'AbortError') {
+            editMessageText(returnMsg, `${returnMsg.text}\n<b>Stopped</b>`, htmlFmt);
+            return;
+        }
         editMessageText(returnMsg, `Error processing message: ${error.message}`);
     } finally {
-        if (filePath) deleteFile(filePath);
+        if (filePath) util.deleteFile(filePath);
     }
-}
-
-/**
- * Delay between message updates in milliseconds
- */
-const messagesDelay = 1000;
-/**
- * Maximum characters allowed in a single Telegram message
- */
-const charsInMessage = 4096;
-/**
- * Reserved characters for status indicators like 'Generating...'
- */
-const reservedChars = 23;
-
-/**
- * Streams transcription results to the bot, handling message splitting and updates
- * 
- * @param returnMsg - Message that will be updated and used for threading
- * @param stream - Stream of transcription events from OpenAI
- * 
- * @example
- * ```typescript
- * await streamTranscriptionToBot(message, stream);
- * ```
- */
-async function streamTranscriptionToBot(
-    returnMsg: Message,
-    stream: Stream<TranscriptionStreamEvent>,
-) {
-    const startTime = Date.now();
-    console.log('[Stream] Starting transcription streaming');
-
-    let lastMsgTime = startTime;
-    let buffer = '';
-    let messageCount = 1; // Start with 1 for the initial message
-
-    for await (const chunk of stream) {
-        if (chunk.type === 'transcript.text.delta') {
-            console.log('[AI] Chunk generated', {
-                deltaLength: chunk.delta.length,
-                bufferLength: buffer.length,
-                totalLength: buffer.length + chunk.delta.length,
-            });
-
-            const now = Date.now();
-            if ((buffer + chunk.delta).length + reservedChars <= charsInMessage) {
-                buffer += chunk.delta;
-                if (now - lastMsgTime > messagesDelay) {
-                    lastMsgTime = now;
-                    console.log('[Stream] Updating message with new content:', {
-                        messageId: returnMsg.message_id,
-                        bufferLength: buffer.length,
-                        timeSinceLastUpdate: now - lastMsgTime,
-                    });
-                    editMessageText(returnMsg, `${buffer}\n<em>Generating...</em>`, htmlFmt);
-                }
-            } else {
-                console.log('[Stream] Message limit reached, creating new message:', {
-                    oldMessageId: returnMsg.message_id,
-                    bufferLength: buffer.length,
-                    newChunkLength: chunk.delta.length,
-                });
-
-                const oldReturnMsg = returnMsg;
-                returnMsg = await bot.api.sendMessage(
-                    returnMsg.chat.id,
-                    `${chunk.delta}\n<em>Generating...</em>`, {
-                    ...htmlFmt,
-                    reply_parameters: { message_id: returnMsg.message_id },
-                });
-                messageCount++;
-
-                lastMsgTime = now;
-                console.log('[Stream] Finalizing previous message:', {
-                    messageId: oldReturnMsg.message_id,
-                    finalLength: buffer.length,
-                });
-                editMessageText(oldReturnMsg, buffer);
-                buffer = chunk.delta;
-            }
-        } else if (chunk.type === 'transcript.text.done') {
-            console.log('[AI] Response generated', {
-                chunk,
-                totalMessages: messageCount,
-                finalBufferLength: buffer.length,
-            });
-        } else {
-            console.log('[AI] Unknown chunk type:', { chunk });
-        }
-    }
-
-    const finalDelay = messagesDelay - (Date.now() - lastMsgTime);
-    if (finalDelay > 0) {
-        console.log('[Stream] Waiting final message delay:', finalDelay, 'ms');
-        await new Promise(resolve => setTimeout(resolve, finalDelay));
-    }
-
-    console.log('[Stream] Finalizing transcription:', {
-        messageId: returnMsg.message_id,
-        finalLength: buffer.length,
-        totalProcessingTime: Date.now() - startTime,
-        totalMessages: messageCount,
-    });
-
-    return editMessageText(returnMsg, buffer);
 }
 
 /**
  * Helper function for editing message text with optional HTML formatting
  * 
- * @param msg - Message to edit
+ * Updates an existing message with new text content. Supports HTML formatting
+ * for bold, italic, and other text styling.
+ * 
+ * @param msg - Message to edit (must be a text message)
  * @param text - New text of the message, 1-4096 characters after entities parsing
  * @param other - Optional remaining parameters, confer the official reference below
  * @returns Promise that resolves when the message is edited
  * 
  * @example
  * ```typescript
- * await editMessageText(ctx, messageId, 'Updated text');
- * await editMessageText(ctx, messageId, '<b>Bold text</b>', htmlFmt);
+ * // Edit with plain text
+ * await editMessageText(message, 'Updated text');
+ * 
+ * // Edit with HTML formatting
+ * await editMessageText(message, '<b>Bold text</b>', htmlFmt);
  * ```
+ * 
+ * @throws {Error} When message editing fails or message is not editable
  */
 const editMessageText = (
     msg: Message,
@@ -260,13 +231,16 @@ const editMessageText = (
 /**
  * Constructs the full URL for downloading a file from Telegram
  * 
- * @param filePath - File path from Telegram API
- * @returns Complete download URL
+ * Combines the Telegram API base URL with the bot token and file path
+ * to create a complete download URL for media files.
+ * 
+ * @param filePath - File path from Telegram API (e.g., 'documents/file_123.ogg')
+ * @returns Complete download URL for the file
  * 
  * @example
  * ```typescript
- * const url = getFileUrl('documents/file_123.ogg');
- * // Returns: https://api.telegram.org/file/bot<token>/documents/file_123.ogg
+ * const voiceUrl = getFileUrl('voice/voice_456.oga');
+ * // Returns: https://api.telegram.org/file/bot<token>/voice/voice_456.oga
  * ```
  */
 const getFileUrl = (filePath: string) => `https://api.telegram.org/file/bot${bot.token}/${filePath}`;

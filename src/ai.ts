@@ -1,9 +1,5 @@
 import OpenAI from 'openai';
-import { Stream } from 'openai/core/streaming';
-import { TranscriptionStreamEvent } from 'openai/resources/audio/transcriptions';
 import { createReadStream } from 'fs';
-
-export type { Stream, TranscriptionStreamEvent };
 
 // TODO: Add enhancing, summary
 
@@ -13,25 +9,30 @@ export type { Stream, TranscriptionStreamEvent };
 const ai = new OpenAI({ logLevel: 'info' });
 
 /**
- * Transcribes an audio file using OpenAI
+ * Transcribes audio files using OpenAI's Whisper model
  * 
  * @param audioFilePath - Path to the audio file to transcribe
- * @returns A stream of transcription events
+ * @param signal - An AbortSignal that can be used to cancel the request
+ * @returns Promise that resolves to the transcribed text
  * 
  * @example
  * ```typescript
- * const stream = await transcribe('/path/to/audio.ogg');
- * for await (const chunk of stream) {
- *   if (chunk.type === 'transcript.text.delta') {
- *     console.log(chunk.delta);
- *   }
- * }
+ * const text = await transcribe('/tmp/voice_message.ogg', abortController.signal);
+ * console.log('Transcribed text:', text);
  * ```
+ * 
+ * @throws {Error} When OpenAI API request fails or file cannot be read
+ * @throws {AbortError} When the request is cancelled via AbortSignal
  */
-export const transcribe = (audioFilePath: string) => ai.audio.transcriptions.create({
-    model: 'gpt-4o-mini-transcribe',
-    file: createReadStream(audioFilePath),
-    language: 'ru',
-    prompt: 'Привет, это эммм... промпт с пунктуацией. Бля, круто!',
-    stream: true,
-});
+export async function transcribe(audioFilePath: string, signal: AbortSignal) {
+    const startTime = Date.now();
+    console.log('[AI] Starting audio transcription', { audioFilePath });
+
+    const tr = await ai.audio.transcriptions.create({
+        model: 'whisper-1',
+        file: createReadStream(audioFilePath),
+    }, { signal });
+
+    console.log('[AI] Audio transcribed', { tr, executionTime: Date.now() - startTime });
+    return tr.text;
+}
