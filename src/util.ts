@@ -3,6 +3,7 @@ import { tmpdir } from 'os';
 import { writeFile, unlink } from 'fs/promises';
 import { Readable } from 'stream';
 import { spawn } from 'child_process';
+import { utilLogger as logger } from './logger';
 
 /**
  * Downloads a file from a URL and saves it to a temporary location
@@ -25,8 +26,7 @@ import { spawn } from 'child_process';
  * @throws {AbortError} When the download is cancelled via AbortSignal
  */
 export async function download(url: string, signal: AbortSignal) {
-    const startTime = Date.now();
-    console.log('[download] Starting download', { url });
+    const log = logger.startDownload(url);
 
     const fileName = url.split('/').pop()!.replace('.oga', '.ogg');
     const filePath = join(tmpdir(), `${fileName}`);
@@ -41,16 +41,10 @@ export async function download(url: string, signal: AbortSignal) {
         const stream = Readable.fromWeb(response.body!);
         await writeFile(filePath, stream, { signal });
 
-        console.log('[download] File downloaded', {
-            filePath,
-            executionTime: Date.now() - startTime,
-        });
+        log.downloaded(filePath);
         return filePath;
     } catch (error: any) {
-        console.error('[download] Error downloading file', {
-            error: error.message,
-            stack: error.stack,
-        });
+        log.error(error);
         throw error;
     }
 }
@@ -72,11 +66,12 @@ export async function download(url: string, signal: AbortSignal) {
  * ```
  */
 export async function deleteFile(filePath: string) {
+    const log = logger.startFileDeleting(filePath);
     try {
         await unlink(filePath);
-        console.log(`[deleteFile] File deleted`, { filePath });
+        log.deleted();
     } catch (error: any) {
-        console.error(`[deleteFile] File not deleted`, { filePath, error });
+        log.error(error);
     }
 }
 
@@ -106,8 +101,7 @@ export async function deleteFile(filePath: string) {
  * @throws {AbortError} When the extraction is cancelled via AbortSignal
  */
 export async function extractAudioFromVideo(filePath: string, signal: AbortSignal) {
-    const startTime = Date.now();
-    console.log('[extractAudioFromVideo] Starting audio extraction', { filePath });
+    const log = logger.startAudioExtracting(filePath);
 
     const fileName = filePath.split('/').pop()!;
     const outputPath = join(tmpdir(), `${fileName}.m4a`);
@@ -128,36 +122,18 @@ export async function extractAudioFromVideo(filePath: string, signal: AbortSigna
         });
 
         ffmpeg.on('close', (code) => {
-            const endTime = Date.now();
-            const executionTime = endTime - startTime;
-
             if (code === 0) {
-                console.log('[extractAudioFromVideo] Audio extraction completed', {
-                    inputPath: filePath,
-                    outputPath,
-                    executionTime,
-                });
+                log.extracted(outputPath);
                 resolve(outputPath);
             } else {
                 const error = new Error(`FFmpeg process exited with code ${code}: ${stderr}`);
-                console.error('[extractAudioFromVideo] Audio extraction failed', {
-                    inputPath: filePath,
-                    error: error.message,
-                    executionTime,
-                });
+                log.error(error);
                 reject(error);
             }
         });
 
         ffmpeg.on('error', (error) => {
-            const endTime = Date.now();
-            const executionTime = endTime - startTime;
-
-            console.error('[extractAudioFromVideo] FFmpeg process error', {
-                inputPath: filePath,
-                error: error.message,
-                executionTime,
-            });
+            log.error(error);
             reject(error);
         });
     });
@@ -175,9 +151,9 @@ export async function extractAudioFromVideo(filePath: string, signal: AbortSigna
  * 
  * @example
  * ```typescript
- * const text = "This is a very long message that needs to be split";
+ * const text = 'This is a very long message that needs to be split';
  * const chunks = chunked(text, 10);
- * // Returns: ["This is a v", "ery long m", "essage th", "at needs ", "to be spl", "it"]
+ * // Returns: ['This is a v', 'ery long m', 'essage th', 'at needs ', 'to be spl', 'it']
  * ```
  */
 export function chunked(str: string, chunkSize: number) {

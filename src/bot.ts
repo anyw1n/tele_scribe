@@ -6,6 +6,7 @@ import { Message } from 'grammy/types';
 
 import { transcribe } from './ai';
 import * as util from './util';
+import { botLogger as logger } from './logger';
 
 const { BOT_TOKEN: botToken, WH_DOMAIN: whDomain } = process.env;
 
@@ -20,6 +21,12 @@ const charsInMessage = 4096;
  */
 const bot = new Bot(botToken!);
 bot.api.config.use(apiThrottler(), autoRetry());
+
+bot.use(async (ctx, next) => {
+    const log = logger.messageReceived(ctx.update);
+    await next();
+    log.completed();
+})
 
 /**
  * Map to track active transcription cancellations
@@ -40,15 +47,15 @@ const cancellations = new Map<string, AbortController>();
  * @throws {Error} When webhook setup fails or domain is invalid
  */
 export async function createWebhook() {
-    console.log('[Webhook] Creating webhook with domain:', whDomain);
+    const log = logger.startWebhookCreating(whDomain!);
 
     try {
         await bot.api.setWebhook(whDomain!);
         const webhook = webhookCallback(bot, 'express');
-        console.log('[Webhook] Webhook created successfully');
+        log.created();
         return webhook;
     } catch (error) {
-        console.error('[Webhook] Failed to create webhook:', error);
+        log.error(error);
         throw error;
     }
 }
@@ -62,15 +69,7 @@ const htmlFmt = { parse_mode: 'HTML' } as const;
 /**
  * Handles the /start command
  */
-bot.command('start', (ctx) => {
-    console.log('[Bot] /start command received from user:', {
-        userId: ctx.from?.id,
-        username: ctx.from?.username,
-        chatId: ctx.chatId,
-        chatType: ctx.chat?.type,
-    });
-    return ctx.reply('Hello!');
-});
+bot.command('start', (ctx) => ctx.reply('Hello!'));
 
 /**
  * Handles callback queries from inline keyboards
@@ -96,13 +95,6 @@ bot.on('callback_query:data', async (ctx) => {
  * Creates a cancellation mechanism to allow users to stop transcription.
  */
 bot.on([':voice', ':video_note'], async (ctx) => {
-    console.log('[Bot] Message received:', {
-        messageType: 'voice' in ctx.msg ? 'voice' : 'video_note',
-        userId: ctx.from?.id,
-        chatId: ctx.chatId,
-        messageId: ctx.msgId,
-    });
-
     const cancellationId = `${ctx.msgId}`;
     const abortController = new AbortController();
     cancellations.set(cancellationId, abortController);
@@ -148,18 +140,11 @@ async function transcribeMedia(
     returnMsg: Message.TextMessage,
     signal: AbortSignal,
 ) {
-    const startTime = Date.now();
+    const log = logger.startMediaProcessing();
     let filePath: string | undefined;
     try {
         const file = await ctx.getFile();
-        console.log('[Bot] File info received:', {
-            fileId: file.file_id,
-            fileSize: file.file_size,
-            filePath: file.file_path,
-            userId: ctx.from?.id,
-            chatId: ctx.chatId,
-            messageId: ctx.msgId,
-        });
+        log.fileInfoReceived(file);
         filePath = await util.download(getFileUrl(file.file_path!), signal);
 
         if ('video_note' in ctx.msg) {
@@ -180,16 +165,9 @@ async function transcribeMedia(
             );
         }
 
-        console.log('[Bot] Message processing completed successfully in', Date.now() - startTime, 'ms');
+        log.completed();
     } catch (error: any) {
-        console.error('[Bot] Error processing message', {
-            error: error.message,
-            stack: error.stack,
-            chatId: ctx.chatId,
-            userId: ctx.from?.id,
-            processingTime: Date.now() - startTime,
-            filePath,
-        });
+        log.error(error);
         if (error.name === 'AbortError') {
             editMessageText(returnMsg, `${returnMsg.text}\n<b>Stopped</b>`, htmlFmt);
             return;

@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { createReadStream } from 'fs';
+import { aiLogger as logger } from './logger';
 
 // TODO: Add enhancing, summary
 
@@ -25,14 +26,18 @@ const ai = new OpenAI({ logLevel: 'info' });
  * @throws {AbortError} When the request is cancelled via AbortSignal
  */
 export async function transcribe(audioFilePath: string, signal: AbortSignal) {
-    const startTime = Date.now();
-    console.log('[AI] Starting audio transcription', { audioFilePath });
+    const log = logger.startAudioTranscription(audioFilePath);
 
-    const tr = await ai.audio.transcriptions.create({
-        model: 'whisper-1',
-        file: createReadStream(audioFilePath),
-    }, { signal });
+    try {
+        const tr = await ai.audio.transcriptions.create({
+            model: 'whisper-1',
+            file: createReadStream(audioFilePath),
+        }, { signal });
 
-    console.log('[AI] Audio transcribed', { tr, executionTime: Date.now() - startTime });
-    return tr.text;
+        log.audioTranscribed(tr);
+        return tr.text;
+    } catch (error: any) {
+        log.error(error);
+        throw error;
+    }
 }

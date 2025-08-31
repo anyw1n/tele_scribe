@@ -3,6 +3,7 @@ dotenv.config({ path: `.env.${process.env['NODE_ENV']}` });
 
 import express from 'express';
 import { createWebhook } from './bot';
+import { serverLogger as logger } from './logger';
 
 const { PORT: port } = process.env;
 
@@ -13,5 +14,5 @@ const { PORT: port } = process.env;
 (async () => {
     const app = express();
     app.use(express.json(), await createWebhook());
-    app.listen(port, () => console.log(`Server listening on port ${port}...`));
+    app.listen(port, () => logger.startServer(port!));
 })();
