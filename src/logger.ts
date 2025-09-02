@@ -37,16 +37,17 @@ class ServerLogFlow extends LogFlow {
 }
 
 class AiLogger {
-    startAudioTranscription = (filePath: string) => new AiTranscribeLogFlow(filePath);
+    startAudioTranscription = (filePath: string, model: string, dictionary: string) =>
+        new AiTranscribeLogFlow(filePath, model, dictionary);
 }
 const aiLogger = new AiLogger();
 
 class AiTranscribeLogFlow extends MeasurableLogFlow {
     override tag = 'AI';
 
-    constructor(filePath: string) {
+    constructor(filePath: string, model: string, dictionary: string) {
         super();
-        this.log('Start audio transcribing', { filePath });
+        this.log('Start audio transcribing', { filePath, model, dictionary });
     }
 
     error = (error: any) =>

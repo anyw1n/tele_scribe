@@ -63,3 +63,5 @@ Thumbs.db
 
 # Ignore built ts files
 dist/**/*
+
+dict.txt
