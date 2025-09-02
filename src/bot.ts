@@ -8,7 +8,13 @@ import { transcribe } from './ai';
 import * as util from './util';
 import { botLogger as logger } from './logger';
 
-const { BOT_TOKEN: botToken, WH_DOMAIN: whDomain } = process.env;
+const {
+    BOT_TOKEN: botToken,
+    WH_DOMAIN: whDomain,
+    CHATS_ALLOWLIST: chatsAllowlist,
+} = process.env;
+
+const allowedChats = chatsAllowlist?.split(',');
 
 /**
  * Maximum characters allowed in a single Telegram message
@@ -65,11 +71,13 @@ export async function createWebhook() {
  */
 const htmlFmt = { parse_mode: 'HTML' } as const;
 
-// TODO: Make bot private
 /**
  * Handles the /start command
  */
-bot.command('start', (ctx) => ctx.reply('Hello!'));
+bot.command('start', async (ctx) => {
+    const allowed = allowedChats?.includes(`${ctx.chatId}`) ?? true;
+    ctx.reply('Hello! ' + (allowed ? '' : 'Sorry, you are not permitted to use this bot.'));
+});
 
 /**
  * Handles callback queries from inline keyboards
@@ -94,20 +102,22 @@ bot.on('callback_query:data', async (ctx) => {
  * Initiates transcription process for audio content and sends status updates.
  * Creates a cancellation mechanism to allow users to stop transcription.
  */
-bot.on([':voice', ':video_note'], async (ctx) => {
-    const cancellationId = `${ctx.msgId}`;
-    const abortController = new AbortController();
-    cancellations.set(cancellationId, abortController);
+bot.on([':voice', ':video_note']).filter(
+    (ctx) => allowedChats?.includes(`${ctx.chatId}`) ?? true,
+    async (ctx) => {
+        const cancellationId = `${ctx.msgId}`;
+        const abortController = new AbortController();
+        cancellations.set(cancellationId, abortController);
 
-    const msg = await ctx.reply(`<em>Start transcribing...</em>`, {
-        ...htmlFmt,
-        reply_parameters: { message_id: ctx.msgId },
-        reply_markup: new InlineKeyboard().text('Stop', `stop:${cancellationId}`),
+        const msg = await ctx.reply(`<em>Start transcribing...</em>`, {
+            ...htmlFmt,
+            reply_parameters: { message_id: ctx.msgId },
+            reply_markup: new InlineKeyboard().text('Stop', `stop:${cancellationId}`),
+        });
+        transcribeMedia(ctx, msg, abortController.signal)
+            .finally(() => cancellations.delete(cancellationId));
+        return msg;
     });
-    transcribeMedia(ctx, msg, abortController.signal)
-        .finally(() => cancellations.delete(cancellationId));
-    return msg;
-});
 
 /**
  * Processes voice and video note messages by downloading, transcribing, and streaming results

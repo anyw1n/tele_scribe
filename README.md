@@ -107,6 +107,7 @@ tele_scribe/
 | `WH_DOMAIN` | Server domain for bot webhook | Yes | - |
 | `PORT` | Server Port | No* | Defined by App Engine when deployed. Required when run locally |
 | `OPENAI_API_KEY` | OpenAI API Key | Yes | - |
+| `CHATS_ALLOWLIST` | Chat Ids where bot will respond | No | Bot will respond in every chat |
 
 ## Usage
 
